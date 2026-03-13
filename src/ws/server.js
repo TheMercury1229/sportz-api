@@ -27,10 +27,27 @@ export function attachWebSocketServer(server) {
 
   // On connection
   wss.on("connection", (socket) => {
+    socket.isAlive = true;
+    socket.on("pong", () => {
+      socket.isAlive = true;
+    });
     sendJson(socket, {
       message: "Welcome to the Match Updates WebSocket!",
     });
     socket.on("error", console.error);
+  });
+  const interval = setInterval(() => {
+    wss.clients.forEach((socket) => {
+      if (socket.isAlive === false) {
+        return socket.terminate();
+      }
+      socket.isAlive = false;
+      socket.ping();
+    });
+  }, 30000);
+
+  wss.on("close", () => {
+    clearInterval(interval);
   });
 
   return { broadcastMatchCreated };
