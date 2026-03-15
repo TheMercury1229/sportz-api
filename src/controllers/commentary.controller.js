@@ -82,7 +82,7 @@ export async function createCommentary(req, res) {
       .returning();
     if (res.app.locals.broadcastCommentary) {
       res.app.locals.broadcastCommentary(
-        createCommentary.matchId,
+        parsedParams.data.id,
         createdCommentary,
       );
     }

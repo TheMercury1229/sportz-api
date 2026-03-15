@@ -5,7 +5,7 @@ const arcjetEnv = process.env.ARCJET_ENV || "production";
 const arcjetMode = process.env.ARCJET_MODE === "DRY_RUN" ? "DRY_RUN" : "LIVE";
 
 if (!arcjetKey) {
-  throw new Error("ARCJET_KEY is not set. Arcjet will not be initialized.");
+  console.warn("ARCJET_KEY is not set. Arcjet will not be initialized.");
 }
 
 export const httpArcject = arcjetKey

@@ -1,6 +1,12 @@
 import { WebSocket, WebSocketServer } from "ws";
 import { wsArcjet } from "../arcjet.js";
+
+const WS_PATH = "/ws";
+const MAX_PAYLOAD_BYTES = 1024 * 1024;
+const HEARTBEAT_INTERVAL_MS = 30000;
+
 const matchSubscribers = new Map();
+
 function subscribeToMatch(matchId, socket) {
   if (!matchSubscribers.has(matchId)) {
     matchSubscribers.set(matchId, new Set());
@@ -45,36 +51,56 @@ function broadcast(wss, payload) {
 
 function handleMessage(socket, data) {
   let message;
+
   try {
     message = JSON.parse(data.toString());
-    if (message?.type === "subscribe" && Number.isInteger(message.matchId)) {
-      subscribeToMatch(message.matchId, socket);
-      socket.subscriptions.add(message.matchId);
-      sendJson(socket, {
-        type: "subscribed",
-        matchId: message.matchId,
-      });
-    }
-    if (message?.type === "unsubscribe" && Number.isInteger(message.matchId)) {
-      unsubscribeFromMatch(message.matchId, socket);
-      socket.subscriptions.delete(message.matchId);
-      sendJson(socket, {
-        type: "unsubscribed",
-        matchId: message.matchId,
-      });
-    }
   } catch {
     sendJson(socket, { type: "error", message: "Invalid message format" });
+    return;
   }
+
+  if (!message || typeof message !== "object") {
+    sendJson(socket, { type: "error", message: "Invalid message format" });
+    return;
+  }
+
+  if (message.type !== "subscribe" && message.type !== "unsubscribe") {
+    sendJson(socket, { type: "error", message: "Unsupported message type" });
+    return;
+  }
+
+  if (!Number.isInteger(message.matchId) || message.matchId <= 0) {
+    sendJson(socket, { type: "error", message: "Invalid matchId" });
+    return;
+  }
+
+  if (message.type === "subscribe") {
+    subscribeToMatch(message.matchId, socket);
+    socket.subscriptions.add(message.matchId);
+    sendJson(socket, {
+      type: "subscribed",
+      matchId: message.matchId,
+    });
+    return;
+  }
+
+  unsubscribeFromMatch(message.matchId, socket);
+  socket.subscriptions.delete(message.matchId);
+  sendJson(socket, {
+    type: "unsubscribed",
+    matchId: message.matchId,
+  });
 }
+
 export function attachWebSocketServer(server) {
   const wss = new WebSocketServer({
     noServer: true,
-    maxPayload: 1024 * 1024 * 10, // 10MB
+    maxPayload: MAX_PAYLOAD_BYTES,
   });
 
   server.on("upgrade", async (req, socket, head) => {
-    if (req.url !== "/ws") {
+    const requestUrl = new URL(req.url ?? "", "http://localhost");
+    if (requestUrl.pathname !== WS_PATH) {
       socket.destroy();
       return;
     }
@@ -123,6 +149,7 @@ export function attachWebSocketServer(server) {
     });
     socket.subscriptions = new Set();
     sendJson(socket, {
+      type: "connected",
       message: "Welcome to the Match Updates WebSocket!",
     });
     socket.on("message", (data) => {
@@ -143,7 +170,7 @@ export function attachWebSocketServer(server) {
       socket.isAlive = false;
       socket.ping();
     });
-  }, 30000);
+  }, HEARTBEAT_INTERVAL_MS);
 
   wss.on("close", () => {
     clearInterval(interval);
