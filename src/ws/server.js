@@ -1,6 +1,36 @@
 import { WebSocket, WebSocketServer } from "ws";
 import { wsArcjet } from "../arcjet.js";
+const matchSubscribers = new Map();
+function subscribeToMatch(matchId, socket) {
+  if (!matchSubscribers.has(matchId)) {
+    matchSubscribers.set(matchId, new Set());
+  }
+  matchSubscribers.get(matchId).add(socket);
+}
 
+function unsubscribeFromMatch(matchId, socket) {
+  if (matchSubscribers.has(matchId)) {
+    matchSubscribers.get(matchId).delete(socket);
+    if (matchSubscribers.get(matchId).size === 0) {
+      matchSubscribers.delete(matchId);
+    }
+  }
+}
+function cleanupSubscriptions(socket) {
+  for (const matchId of socket.subscriptions) {
+    unsubscribeFromMatch(matchId, socket);
+  }
+}
+
+function broadcastToMatch(matchId, payload) {
+  const subscribers = matchSubscribers.get(matchId);
+  if (!subscribers || subscribers.size === 0) return;
+  const message = JSON.stringify(payload);
+  for (const client of subscribers) {
+    if (client.readyState !== WebSocket.OPEN) continue;
+    client.send(message);
+  }
+}
 function sendJson(socket, payload) {
   if (socket.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify(payload));
@@ -13,12 +43,67 @@ function broadcast(wss, payload) {
   }
 }
 
+function handleMessage(socket, data) {
+  let message;
+  try {
+    message = JSON.parse(data.toString());
+    if (message?.type === "subscribe" && Number.isInteger(message.matchId)) {
+      subscribeToMatch(message.matchId, socket);
+      socket.subscriptions.add(message.matchId);
+      sendJson(socket, {
+        type: "subscribed",
+        matchId: message.matchId,
+      });
+    }
+    if (message?.type === "unsubscribe" && Number.isInteger(message.matchId)) {
+      unsubscribeFromMatch(message.matchId, socket);
+      socket.subscriptions.delete(message.matchId);
+      sendJson(socket, {
+        type: "unsubscribed",
+        matchId: message.matchId,
+      });
+    }
+  } catch {
+    sendJson(socket, { type: "error", message: "Invalid message format" });
+  }
+}
 export function attachWebSocketServer(server) {
   const wss = new WebSocketServer({
-    server,
-    path: "/ws",
+    noServer: true,
     maxPayload: 1024 * 1024 * 10, // 10MB
   });
+
+  server.on("upgrade", async (req, socket, head) => {
+    if (req.url !== "/ws") {
+      socket.destroy();
+      return;
+    }
+
+    try {
+      if (wsArcjet) {
+        const decision = await wsArcjet.protect(req);
+        if (decision.isDenied) {
+          const status = decision.reason.isRateLimit()
+            ? "429 Too Many Requests"
+            : "403 Forbidden";
+          socket.write(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`);
+          socket.destroy();
+          return;
+        }
+      }
+
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit("connection", ws, req);
+      });
+    } catch (error) {
+      console.error("Arcjet WS error:", error);
+      socket.write(
+        "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n",
+      );
+      socket.destroy();
+    }
+  });
+
   function broadcastMatchCreated(match) {
     broadcast(wss, {
       type: "match_created",
@@ -26,33 +111,29 @@ export function attachWebSocketServer(server) {
     });
   }
 
+  function broadcastCommentary(matchId, comment) {
+    broadcastToMatch(matchId, { type: "commentary", data: comment });
+  }
+
   // On connection
-  wss.on("connection", async (socket, req) => {
-    // Apply Arcjet WS protection on new connections
-    if (wsArcjet) {
-      try {
-        const decision = await wsArcjet.protect(req);
-        if (decision.isDenied) {
-          const code = decision.reason.isRateLimit() ? 1013 : 1008; // Custom close codes for rate limit and other denials
-          const reason = decision.reason.isRateLimit()
-            ? "Rate Limit Exceeded"
-            : "Access Denied";
-          socket.close(code, reason);
-          return;
-        }
-      } catch (error) {
-        console.error("Arcjet WS error:", error);
-        socket.close(1011, "Server Error");
-      }
-    }
+  wss.on("connection", (socket) => {
     socket.isAlive = true;
     socket.on("pong", () => {
       socket.isAlive = true;
     });
+    socket.subscriptions = new Set();
     sendJson(socket, {
       message: "Welcome to the Match Updates WebSocket!",
     });
-    socket.on("error", console.error);
+    socket.on("message", (data) => {
+      handleMessage(socket, data);
+    });
+    socket.on("error", () => {
+      socket.terminate();
+    });
+    socket.on("close", () => {
+      cleanupSubscriptions(socket);
+    });
   });
   const interval = setInterval(() => {
     wss.clients.forEach((socket) => {
@@ -68,5 +149,5 @@ export function attachWebSocketServer(server) {
     clearInterval(interval);
   });
 
-  return { broadcastMatchCreated };
+  return { broadcastMatchCreated, broadcastCommentary };
 }

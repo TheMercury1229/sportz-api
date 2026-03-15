@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import http from "http";
 import { attachWebSocketServer } from "./ws/server.js";
 import { securityMiddleware } from "./arcjet.js";
+import { commentaryRouter } from "./routes/commentary.route.js";
 
 dotenv.config();
 
@@ -21,8 +22,12 @@ app.get("/", (req, res) => {
   });
 });
 app.use("/api/match", matchRouter);
-const { broadcastMatchCreated } = attachWebSocketServer(server);
+app.use("/api/match/:id/commentary", commentaryRouter);
+
+const { broadcastMatchCreated, broadcastCommentary } =
+  attachWebSocketServer(server);
 app.locals.broadcastMatchCreated = broadcastMatchCreated;
+app.locals.broadcastCommentary = broadcastCommentary;
 server.listen(PORT, HOST, () => {
   const baseUrl =
     HOST === "0.0.0.0" ? `http://localhost:${PORT}` : `http://${HOST}:${PORT}`;
